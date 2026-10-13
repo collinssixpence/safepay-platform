@@ -1,6 +1,6 @@
 
 import { NextResponse } from "next/server";
-import { randomUUID } from "node:crypto";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -39,7 +39,7 @@ export async function GET() {
     const { data, error } = await supabase
         .from("transactions")
         .select(
-            "id,buyer_id,seller_email,seller_full_name,seller_phone,item_name,item_description,amount,currency,payment_method,status,confirmation_code_hash,payment_confirmed_at,seller_confirmed_at,confirmation_code_redeemed_at,buyer_received_at,created_at,updated_at,completed_at,cancelled_at"
+            "id,buyer_id,seller_email,seller_full_name,seller_phone,item_name,item_description,amount,currency,payment_method,status,confirmation_code_expires_at,payment_confirmed_at,seller_confirmed_at,confirmation_code_redeemed_at,buyer_received_at,created_at,updated_at,completed_at,cancelled_at"
         )
         .or(`buyer_id.eq.${user.id},seller_email.eq.${user.email?.toLowerCase() ?? ""}`)
         .order("created_at", { ascending: false });
@@ -199,24 +199,45 @@ export async function POST(request: Request) {
         }
 
         stage = "insert transaction";
-        const { data, error } = await supabase
-            .from("transactions")
-            .insert({
-                buyer_id: user.id,
-                seller_email: sellerEmail,
-                seller_full_name: sellerFullName,
-                seller_phone: sellerPhone,
-                item_name: itemName,
-                item_description: itemDescription,
-                amount: Math.round(amount * 100) / 100,
-                currency: "USD",
-                payment_method: paymentMethod,
-                status: "pending_payment",
-            })
-            .select(
-                "id,buyer_id,seller_email,seller_full_name,seller_phone,item_name,item_description,amount,currency,payment_method,status,created_at,updated_at,completed_at,cancelled_at"
-            )
-            .single();
+        let data;
+        let error;
+        let confirmationCode = "";
+
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+            confirmationCode = String(randomInt(1000000000, 10000000000));
+            const confirmationCodeHash = createHash("sha256").update(confirmationCode).digest("hex");
+            const result = await supabase
+                .from("transactions")
+                .insert({
+                    buyer_id: user.id,
+                    seller_email: sellerEmail,
+                    seller_full_name: sellerFullName,
+                    seller_phone: sellerPhone,
+                    item_name: itemName,
+                    item_description: itemDescription,
+                    amount: Math.round(amount * 100) / 100,
+                    currency: "USD",
+                    payment_method: paymentMethod,
+                    status: "pending_payment",
+                    confirmation_code_hash: confirmationCodeHash,
+                })
+                .select(
+                    "id,buyer_id,seller_email,seller_full_name,seller_phone,item_name,item_description,amount,currency,payment_method,status,confirmation_code_expires_at,created_at,updated_at,completed_at,cancelled_at"
+                )
+                .single();
+
+            if (result.error?.code === "23505") continue;
+            data = result.data;
+            error = result.error;
+            break;
+        }
+
+        if (!data && !error) {
+            return NextResponse.json(
+                { error: "A unique confirmation code could not be generated. Please try again." },
+                { status: 503 }
+            );
+        }
 
         if (error) {
             logTransactionPostFailure(diagnosticId, stage, error);
@@ -237,6 +258,7 @@ export async function POST(request: Request) {
             {
                 message: "Transaction created. Continue to the simulated payment flow.",
                 transaction: data,
+                confirmation_code: confirmationCode,
             },
             { status: 201 }
         );

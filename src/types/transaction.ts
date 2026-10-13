@@ -23,7 +23,7 @@ export type Transaction = {
     currency: string;
     payment_method: PaymentMethod;
     status: TransactionStatus;
-    confirmation_code_hash: string | null;
+    confirmation_code_expires_at: string | null;
     payment_confirmed_at: string | null;
     seller_confirmed_at: string | null;
     confirmation_code_redeemed_at: string | null;

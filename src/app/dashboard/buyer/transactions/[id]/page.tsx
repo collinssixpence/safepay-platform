@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, CheckCircle2, CircleAlert, RefreshCw } from "lucide-react";
+import { ArrowLeft, CheckCircle2, CircleAlert, Copy, RefreshCw } from "lucide-react";
 import type { Transaction } from "@/types/transaction";
 
 const statusLabel: Record<string, string> = {
@@ -24,6 +24,12 @@ export default function BuyerTransactionDetailPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [busy, setBusy] = useState(false);
+    const [regenerating, setRegenerating] = useState(false);
+    const [actionError, setActionError] = useState("");
+    const [confirmationCode, setConfirmationCode] = useState("");
+    const [codeExpiry, setCodeExpiry] = useState("");
+    const [copyMessage, setCopyMessage] = useState("Copy code");
+    const [currentTime, setCurrentTime] = useState(0);
 
     const loadTransaction = useCallback(async () => {
         setLoading(true);
@@ -69,10 +75,15 @@ export default function BuyerTransactionDetailPage() {
         };
     }, [loadTransaction]);
 
+    useEffect(() => {
+        const timer = window.setInterval(() => setCurrentTime(Date.now()), 1000);
+        return () => window.clearInterval(timer);
+    }, []);
+
     async function confirmReceipt() {
         if (!transaction) return;
         setBusy(true);
-        setError("");
+        setActionError("");
 
         try {
             const response = await fetch(`/api/transactions/${transaction.id}/receipt`, {
@@ -87,11 +98,56 @@ export default function BuyerTransactionDetailPage() {
 
             setTransaction(result.transaction);
         } catch (err) {
-            setError(err instanceof Error ? err.message : "Could not confirm receipt.");
+            setActionError(err instanceof Error ? err.message : "Could not confirm receipt.");
         } finally {
             setBusy(false);
         }
     }
+
+    async function generateNewCode() {
+        if (!transaction) return;
+        setRegenerating(true);
+        setActionError("");
+        setConfirmationCode("");
+
+        try {
+            const response = await fetch(`/api/transactions/${transaction.id}/confirmation-code`, {
+                method: "POST",
+            });
+            const result = await response.json();
+
+            if (!response.ok) {
+                throw new Error(result.error ?? "Could not generate a new code.");
+            }
+
+            setConfirmationCode(result.confirmation_code);
+            setCodeExpiry(result.expires_at);
+            setTransaction((current) => current
+                ? { ...current, confirmation_code_expires_at: result.expires_at }
+                : current);
+            setCurrentTime(Date.now());
+        } catch (err) {
+            setActionError(err instanceof Error ? err.message : "Could not generate a new code.");
+        } finally {
+            setRegenerating(false);
+        }
+    }
+
+    async function copyCode() {
+        if (!confirmationCode) return;
+        try {
+            await navigator.clipboard.writeText(confirmationCode);
+            setCopyMessage("Copied");
+        } catch {
+            setCopyMessage("Copy failed");
+        }
+    }
+
+    const expiry = codeExpiry || transaction?.confirmation_code_expires_at || "";
+    const expiryTime = expiry ? Date.parse(expiry) : Number.NaN;
+    const codeExpired = !Number.isFinite(expiryTime) || expiryTime <= currentTime;
+    const canGenerateCode = transaction
+        && (transaction.status === "pending_payment" || transaction.status === "payment_simulated");
 
     if (loading) {
         return <main className="min-h-screen bg-slate-50 p-6 text-slate-900"><p className="text-center text-slate-500">Loading transaction details…</p></main>;
@@ -148,6 +204,45 @@ export default function BuyerTransactionDetailPage() {
                         <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
                             <h2 className="text-lg font-bold">Status and next steps</h2>
                             <p className="mt-4 text-sm text-slate-600">{transaction.item_description}</p>
+
+                            {(transaction.status === "pending_payment" || transaction.status === "payment_simulated") && (
+                                <div className="mt-5 rounded-xl border border-blue-200 bg-blue-50 p-4">
+                                    <h3 className="font-bold text-slate-900">Buyer confirmation code</h3>
+                                    {expiry ? (
+                                        <p className="mt-2 text-sm text-slate-700">
+                                            {codeExpired
+                                                ? "The current code has expired."
+                                                : `Code expires ${new Date(expiry).toLocaleString()} (${Math.ceil((expiryTime - currentTime) / 60000)} min remaining).`}
+                                            <span className="mt-1 block text-xs text-slate-500">The server checks expiry when the seller verifies the code.</span>
+                                        </p>
+                                    ) : (
+                                        <p className="mt-2 text-sm text-slate-700">A new code is available for this transaction.</p>
+                                    )}
+
+                                    {confirmationCode && (
+                                        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-200 bg-white p-3">
+                                            <span aria-label="Ten-digit buyer confirmation code" className="font-mono text-2xl font-extrabold tracking-[0.18em] text-blue-800">{confirmationCode}</span>
+                                            <button type="button" onClick={copyCode} className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-200">
+                                                <Copy size={15} /> <span aria-live="polite">{copyMessage}</span>
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    <p className="mt-3 text-sm text-slate-700">Share this code with your seller only when you are ready to confirm the transaction.</p>
+                                    {canGenerateCode && (
+                                        <button
+                                            type="button"
+                                            onClick={generateNewCode}
+                                            disabled={regenerating || !codeExpired}
+                                            className="mt-4 w-full rounded-xl bg-blue-700 px-4 py-3 font-bold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
+                                        >
+                                            {regenerating ? "Generating new code…" : "Generate New Code"}
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+
+                            {actionError && <p role="alert" className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-800">{actionError}</p>}
 
                             {transaction.status === "awaiting_delivery" && (
                                 <button
